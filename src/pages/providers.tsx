@@ -1,6 +1,6 @@
 import { AuthProvider } from '@/contexts/AuthContext'
-import { GameProvider } from '@/contexts/GameContext'
-import { QueueProvider } from '@/contexts/QueueContext'
+import { ConfigProvider } from '@/contexts/ConfigContext'
+import { LiveActivityProvider } from '@/contexts/LiveActivityContext'
 import { ServiceStatusProvider } from '@/contexts/ServiceStatusContext'
 import { chakraTheme } from '@/styles/chakraTheme'
 import { ChakraProvider } from '@chakra-ui/react'
@@ -12,14 +12,14 @@ interface Props {
 
 export default function Providers({ children }: Props) {
   return (
-    <ServiceStatusProvider>
-      <AuthProvider>
-        <GameProvider>
-          <QueueProvider>
+    <LiveActivityProvider>
+      <ServiceStatusProvider>
+        <ConfigProvider>
+          <AuthProvider>
             <ChakraProvider theme={chakraTheme}>{children}</ChakraProvider>
-          </QueueProvider>
-        </GameProvider>
-      </AuthProvider>
-    </ServiceStatusProvider>
+          </AuthProvider>
+        </ConfigProvider>
+      </ServiceStatusProvider>
+    </LiveActivityProvider>
   )
 }

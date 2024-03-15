@@ -11,11 +11,11 @@ const baseStyle = definePartsStyle({
   indicator: {
     pos: 'relative !important',
     flex: '1 0 3px',
-    bg: 'pink.500',
-    borderRadius: '3px'
+    bg: 'blue.500',
+    borderRadius: '3px',
   },
   tabpanels: {
-    flex: '0 1 100%'
+    flex: '0 1 100%',
   },
   tabpanel: {
     h: '100%',
@@ -24,15 +24,15 @@ const baseStyle = definePartsStyle({
     display: 'flex',
     flexDir: 'column',
     h: '100%',
-  }
+  },
 })
 
 export const tabsTheme = defineMultiStyleConfig({
   baseStyle,
   variants: {
-    default: baseStyle
+    default: baseStyle,
   },
   defaultProps: {
-    variant: 'default'
-  }
+    variant: 'default',
+  },
 })

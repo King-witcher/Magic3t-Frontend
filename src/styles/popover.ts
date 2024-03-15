@@ -1,7 +1,8 @@
 import { popoverAnatomy } from '@chakra-ui/anatomy'
 import { createMultiStyleConfigHelpers } from '@chakra-ui/react'
 
-const { definePartsStyle, defineMultiStyleConfig } = createMultiStyleConfigHelpers(popoverAnatomy.keys)
+const { definePartsStyle, defineMultiStyleConfig } =
+  createMultiStyleConfigHelpers(popoverAnatomy.keys)
 
 const messageBox = definePartsStyle({
   content: {
@@ -12,7 +13,7 @@ const messageBox = definePartsStyle({
     boxShadow: '0 0 30px 10px #00000030',
   },
   arrow: {
-    bg: 'pink.400',
+    bg: 'blue.400',
     border: 'none',
   },
   header: {
@@ -34,7 +35,7 @@ const messageBox = definePartsStyle({
   closeButton: {
     top: '10px',
     right: '10px',
-  }
+  },
 })
 
 const baseStyle = definePartsStyle({
@@ -47,25 +48,25 @@ const baseStyle = definePartsStyle({
     borderRadius: '10px',
     _focusVisible: {
       boxShadow: 'auto',
-    }
+    },
   },
   body: {
     m: 0,
     p: 0,
     _focus: {
       boxShadow: 'none',
-    }
+    },
   },
   popper: {
     _focus: {
       boxShadow: 'none',
-    }
-  }
+    },
+  },
 })
 
 export const popoverTheme = defineMultiStyleConfig({
   baseStyle,
   variants: {
-    messageBox
-  }
+    messageBox,
+  },
 })

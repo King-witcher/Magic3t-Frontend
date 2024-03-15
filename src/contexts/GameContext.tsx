@@ -1,6 +1,5 @@
 import { Timer } from '@/lib/Timer'
-import { compareArrays } from '@/lib/utils'
-import { Choice, GameState, GameStatus } from '@/types/types'
+import { Choice, GameStateReport, GameStatus } from '@/types/types'
 import {
   ReactNode,
   createContext,
@@ -8,38 +7,72 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
-import { io } from 'socket.io-client'
-import { useAuth } from './AuthContext'
+import { Socket, io } from 'socket.io-client'
+import { AuthState } from './AuthContext'
+import { UserData } from '@/models/users/User'
+import { models } from '@/models'
+import { Unsubscribe } from 'firebase/auth'
+import { Api } from '@/services/api'
+import { getTriple } from '@/utils/getTriple'
+import { useGuardedAuth } from './GuardedAuthContext'
+import { useLiveActivity } from './LiveActivityContext'
+import { IoChatbox, IoGameController } from 'react-icons/io5'
+import { useBreakpoint } from '@chakra-ui/react'
 
-type Message = { sender: string; content: string; timestamp: number }
+type Message = { sender: 'you' | 'him'; content: string; timestamp: number }
 
-interface GameData {
-  playerChoices: Choice[]
-  playerTimer: Timer
-  oponentChoices: Choice[]
-  oponentTimer: Timer
-  availableChoices: Choice[]
-  gameStatus: GameStatus
-  turn: 'player' | 'oponent' | null
-  triple: [Choice | 0, Choice | 0, Choice | 0]
-  matchId: string | null
-  playerKey: string | null
-  messages: Message[]
-  oponentProfile: Profile | null
+type GameData =
+  | {
+      matchId: null
+      isActive: false
+      turn: null
+      gameStatus: GameStatus.Waiting
+      messages: Message[]
+      playerChoices: Choice[]
+      oponentChoices: Choice[]
+      playerTimer: Timer
+      oponentTimer: Timer
+      availableChoices: Choice[]
+      winningTriple: null
+      oponentProfile: null
+      ratingsVariation: null
 
-  connectGame(matchId: string): Promise<void>
-  makeChoice(choice: Choice): void
-  sendMessage(message: string): void
-  forfeit(): Promise<void>
-  disconnect(): void
-}
+      connectGame(matchId: string): Promise<void>
+      makeChoice(choice: Choice): void
+      sendMessage(message: string): void
+      forfeit(): Promise<void>
+      disconnect(): void
+    }
+  | {
+      matchId: string
+      isActive: true
+      turn: 'player' | 'oponent' | null
+      gameStatus: GameStatus
+      messages: Message[]
+      playerChoices: Choice[]
+      oponentChoices: Choice[]
+      playerTimer: Timer
+      oponentTimer: Timer
+      availableChoices: Choice[]
+      winningTriple: [Choice, Choice, Choice] | null
+      oponentProfile: UserData | null
+      ratingsVariation: { player: number; oponent: number } | null
+
+      connectGame(matchId: string): Promise<void>
+      makeChoice(choice: Choice): void
+      sendMessage(message: string): void
+      forfeit(): Promise<void>
+      disconnect(): void
+    }
 
 interface Profile {
   name: string
   uid: string
   rating: number
+  photoUrl: string
 }
 
 interface Props {
@@ -49,37 +82,145 @@ interface Props {
 const GameContext = createContext<GameData>({} as GameData)
 
 export function GameProvider({ children }: Props) {
-  const playerTimer = useMemo(() => new Timer(0), [])
-  const oponentTimer = useMemo(() => new Timer(0), [])
-  const [socket, setSocket] = useState<ReturnType<typeof io> | null>(null)
+  const [matchId, setMatchId] = useState<string | null>(null)
+  const isActive = !!matchId
+  const [turn, setTurn] = useState<'player' | 'oponent' | null>(null)
+  const [gameStatus, setGameStatus] = useState(GameStatus.Waiting)
   const [playerChoices, setPlayerChoices] = useState<Choice[]>([])
   const [oponentChoices, setOponentChoices] = useState<Choice[]>([])
-  const [gameStatus, setGameStatus] = useState(GameStatus.Waiting)
-  const [turn, setTurn] = useState<'player' | 'oponent' | null>(null)
-  const [matchId, setMatchId] = useState<string | null>(null)
-  const [playerKey, setPlayerKey] = useState<string | null>(null)
+  const [triple, setTriple] = useState<[Choice, Choice, Choice] | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [triple, setTriple] = useState<[Choice | 0, Choice | 0, Choice | 0]>([
-    0, 0, 0,
-  ])
-  const [oponentProfile, setOponentProfile] = useState<Profile | null>(null)
-  const { getToken, user } = useAuth()
+  const [oponentProfile, setOponentProfile] = useState<UserData | null>(null)
+  const [ratingsVariation, setRatingsVariation] = useState<{
+    player: number
+    oponent: number
+  } | null>(null)
 
-  /**Limpa o estado do jogo, colocando os timers em 0. */
-  const resetGameState = useCallback(() => {
+  const playerTimer = useRef(new Timer(0))
+  const oponentTimer = useRef(new Timer(0))
+  const socketRef = useRef<Socket | null>(null)
+
+  const { getToken, authState } = useGuardedAuth()
+  const { push } = useLiveActivity()
+  const breakpoint = useBreakpoint()
+
+  /** Limpa o estado do jogo, colocando os timers em 0. */
+  const resetStates = useCallback(() => {
+    setMatchId(null)
+    setTurn(null)
+    setGameStatus(GameStatus.Waiting)
     setPlayerChoices([])
     setOponentChoices([])
-    setGameStatus(GameStatus.Waiting)
+    setMessages([])
+    setTriple(null)
+    setRatingsVariation(null)
+    playerTimer.current.pause()
+    oponentTimer.current.pause()
+    playerTimer.current.setRemaining(0)
+    oponentTimer.current.setRemaining(0)
     setOponentProfile(null)
-    playerTimer.reset(0)
-    oponentTimer.reset(0)
-    setTurn(null)
-  }, [playerTimer, oponentTimer])
+  }, [])
+
+  useEffect(() => {
+    if (
+      breakpoint === 'base' &&
+      messages.length &&
+      messages[messages.length - 1].sender !== 'you'
+    ) {
+      const remove = push({
+        content: <IoChatbox size="16px" />,
+        tooltip: 'Você tem uma nova mensagem',
+      })
+      setTimeout(remove, 3000)
+      return remove
+    }
+  }, [messages.length, breakpoint])
+
+  const handleReceiveOponentUid = useCallback(async (uid: string) => {
+    const oponentProfile = await models.users.getById(uid)
+    setOponentProfile(oponentProfile)
+  }, [])
+
+  const handleReceiveRatingsVariation = useCallback(
+    (data: { player: number; oponent: number }) => {
+      setRatingsVariation(data)
+    },
+    [setRatingsVariation],
+  )
+
+  const handleReceiveMessage = useCallback(
+    (message: string) => {
+      setMessages((current) => [
+        ...current,
+        {
+          timestamp: Date.now(),
+          content: message,
+          sender: 'him',
+        },
+      ])
+    },
+    [setMessages],
+  )
+
+  const makeChoice = useCallback((choice: Choice) => {
+    socketRef.current?.emit('choice', choice)
+
+    setTurn('oponent')
+    setPlayerChoices((current) => [...current, choice])
+
+    playerTimer.current.pause()
+    oponentTimer.current.start()
+  }, [])
+
+  function handleServerDisconnect(reason: Socket.DisconnectReason) {
+    console.warn('Socket disconnected because of', reason + '.')
+    if (reason === 'transport error' && matchId) {
+      connectGame(matchId)
+      console.log('Attempting to reconnect')
+    }
+    socketRef.current?.connect()
+  }
+
+  function handleServerGameState(stateString: string) {
+    const incomingGameState = JSON.parse(stateString) as GameStateReport
+    setTurn(
+      incomingGameState.turn
+        ? 'player'
+        : incomingGameState.status === GameStatus.Playing
+        ? 'oponent'
+        : null,
+    )
+    setGameStatus(incomingGameState.status)
+    setPlayerChoices(incomingGameState.playerChoices)
+    setOponentChoices(incomingGameState.oponentChoices)
+
+    // Muda qual timer está contando
+    if (incomingGameState.turn) {
+      playerTimer.current.start()
+      oponentTimer.current.pause()
+    } else if (incomingGameState.status === GameStatus.Playing) {
+      playerTimer.current.pause()
+      oponentTimer.current.start()
+    } else {
+      playerTimer.current.pause()
+      oponentTimer.current.pause()
+    }
+
+    // Sincroniza os timers com os dados recebidos do servidor
+    playerTimer.current.setRemaining(incomingGameState.playerTimeLeft)
+    oponentTimer.current.setRemaining(incomingGameState.oponentTimeLeft)
+
+    if (incomingGameState.status === GameStatus.Victory)
+      setTriple(getTriple(incomingGameState.playerChoices))
+    else if (incomingGameState.status === GameStatus.Defeat)
+      setTriple(getTriple(incomingGameState.oponentChoices))
+  }
 
   const getEventfulSocket = useCallback(
     async (matchId: string) => {
-      const token = await user?.getIdToken()
+      const token = await getToken()
       if (!token) throw new Error('No Id Token')
+
       const socket = io(`${import.meta.env.VITE_API_URL}/match`, {
         auth: { matchId, token },
       })
@@ -88,144 +229,64 @@ export function GameProvider({ children }: Props) {
         .on('gameState', handleServerGameState)
         .on('disconnect', handleServerDisconnect)
         .on('message', handleReceiveMessage)
-        .on('oponentProfile', setOponentProfile)
+        .on('oponentUid', handleReceiveOponentUid)
+        .on('ratingsVariation', handleReceiveRatingsVariation)
         .on('connect', () => {
           socket.emit('getOponentProfile')
         })
     },
-    [user]
+    [getToken],
   )
 
-  const handleReceiveMessage = useCallback(
-    (message: string) => {
-      setMessages((messages) => [
-        ...messages,
+  const sendMessage = useCallback((message: string) => {
+    if (socketRef.current) {
+      setMessages((current) => [
+        ...current,
         {
-          timestamp: Date.now(),
           content: message,
-          sender: oponentProfile?.name || 'Anônimo',
+          sender: 'you',
+          timestamp: Date.now(),
         },
       ])
-    },
-    [oponentProfile]
-  )
 
-  const makeChoice = useCallback(
-    (choice: Choice) => {
-      socket?.emit('choice', choice)
-      setPlayerChoices((choices) => [...choices, choice])
-      setTurn('oponent')
-      playerTimer.pause()
-      oponentTimer.start()
-    },
-    [setPlayerChoices, setTurn, playerTimer, oponentTimer, socket]
-  )
-
-  function handleServerDisconnect() {
-    setSocket(null)
-  }
-
-  function handleServerGameState(stateString: string) {
-    const incomingGameState = JSON.parse(stateString) as GameState
-    setGameStatus(incomingGameState.status)
-
-    // Atualiza as choices se forem diferentes
-    if (!compareArrays(incomingGameState.oponentChoices, oponentChoices))
-      setOponentChoices(incomingGameState.oponentChoices)
-
-    if (!compareArrays(incomingGameState.playerChoices, playerChoices))
-      setPlayerChoices(incomingGameState.playerChoices)
-
-    // Atualiza a informação sobre turno
-    if (incomingGameState.turn) {
-      setTurn('player')
-      playerTimer.start()
-      oponentTimer.pause()
-    } else if (incomingGameState.status === GameStatus.Playing) {
-      setTurn('oponent')
-      playerTimer.pause()
-      oponentTimer.start()
-    } else {
-      setTurn(null)
-      playerTimer.pause()
-      oponentTimer.pause()
+      socketRef.current?.emit('message', message)
     }
-
-    // Define o terno de números vencedor.
-    function getTriple(
-      numbers: Choice[]
-    ): [Choice | 0, Choice | 0, Choice | 0] {
-      for (let i = 0; i < numbers.length - 2; i++)
-        for (let j = 1; j < numbers.length - 1; j++)
-          for (let k = 2; k < numbers.length; k++)
-            if (numbers[i] + numbers[j] + numbers[k] === 15)
-              return [numbers[i], numbers[j], numbers[k]]
-      return [0, 0, 0]
-    }
-    if (incomingGameState.status === GameStatus.Victory)
-      setTriple(getTriple(incomingGameState.playerChoices))
-    else if (incomingGameState.status === GameStatus.Defeat)
-      setTriple(getTriple(incomingGameState.oponentChoices))
-
-    // Sincroniza os timers
-    playerTimer.setRemaining(incomingGameState.playerTimeLeft)
-    oponentTimer.setRemaining(incomingGameState.oponentTimeLeft)
-  }
-
-  function sendMessage(message: string) {
-    setMessages((messages) => [
-      ...messages,
-      {
-        timestamp: Date.now(),
-        content: message,
-        sender: 'Você',
-      },
-    ])
-    socket?.emit('message', message)
-  }
+  }, [])
 
   const forfeit = useCallback(async () => {
-    await socket?.emitWithAck('forfeit')
-  }, [socket])
+    await socketRef.current?.emitWithAck('forfeit')
+  }, [])
 
   const connectGame = useCallback(
     async (matchId: string) => {
-      if (socket) socket.disconnect()
+      socketRef.current?.disconnect()
 
-      resetGameState()
+      resetStates()
+
       const newSocket = await getEventfulSocket(matchId)
-
+      socketRef.current = newSocket
       setMatchId(matchId)
-      setPlayerKey(playerKey)
-      setSocket(newSocket)
-
+      setTurn(null)
+      setGameStatus(GameStatus.Waiting)
+      setOponentChoices([])
+      setPlayerChoices([])
       newSocket.emitWithAck('ready', {})
     },
-    [
-      setMatchId,
-      setPlayerKey,
-      setSocket,
-      getEventfulSocket,
-      resetGameState,
-      socket,
-    ]
+    [getEventfulSocket, resetStates],
   )
 
   function disconnect() {
-    socket?.disconnect()
-    setSocket(null)
-    setGameStatus(GameStatus.Waiting)
-    setMatchId(null)
-    setPlayerKey(null)
-    setOponentChoices([])
-    setPlayerChoices([])
-    setTurn(null)
-    setTriple([0, 0, 0])
-    setMessages([])
+    socketRef.current?.disconnect()
+    socketRef.current = null
+    resetStates()
   }
 
   const availableChoices = useMemo(() => {
-    let availableChoices: Choice[] = []
+    if (!matchId) {
+      return []
+    }
+
+    const availableChoices: Choice[] = []
 
     for (let i = 1; i < 10; i++) {
       if (
@@ -236,37 +297,85 @@ export function GameProvider({ children }: Props) {
     }
 
     return availableChoices
-  }, [playerChoices, oponentChoices])
+  }, [playerChoices])
+
+  // Auto connects the user to the current game that is being played.
+  useEffect(() => {
+    async function checkStatus() {
+      try {
+        if (authState !== AuthState.SignedIn) return
+        const token = await getToken()
+        if (!token) return
+        const response = await Api.get('/matchId', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        })
+
+        if (response.status === 200) {
+          connectGame(response.data.id)
+        }
+      } catch (e) {
+        console.error(e)
+      }
+    }
+
+    checkStatus()
+  }, [getToken, authState])
 
   useEffect(() => {
     return () => {
-      socket?.disconnect()
+      socketRef.current?.disconnect()
     }
   }, [])
 
+  useEffect(() => {
+    let unsubscribe: Unsubscribe | null = null
+    if (oponentProfile)
+      unsubscribe = models.users.subscribe(oponentProfile?._id, (data) => {
+        setOponentProfile(data)
+      })
+    return () => {
+      if (unsubscribe) unsubscribe()
+    }
+  }, [oponentProfile?._id])
+
+  useEffect(() => {
+    if (matchId) {
+      return push({
+        content: <IoGameController size="16px" />,
+        tooltip: 'Em jogo',
+        url: '/',
+      })
+    }
+  }, [isActive])
+
   return (
     <GameContext.Provider
-      value={{
-        playerChoices,
-        playerTimer,
-        oponentChoices,
-        oponentTimer,
-        availableChoices,
-        gameStatus,
-        turn,
-        triple,
-        matchId,
-        playerKey,
-        messages,
-        oponentProfile,
+      value={
+        {
+          matchId,
+          isActive,
+          turn,
+          gameStatus,
+          messages,
+          playerChoices,
+          oponentChoices,
+          playerTimer: playerTimer.current,
+          oponentTimer: oponentTimer.current,
+          availableChoices,
+          winningTriple: triple,
+          oponentProfile,
+          ratingsVariation,
 
-        /** Se conecta a um jogo a partir de um token. */
-        connectGame,
-        makeChoice,
-        disconnect,
-        sendMessage,
-        forfeit,
-      }}
+          /** Se conecta a um jogo a partir de um token. */
+          connectGame,
+          makeChoice,
+          disconnect,
+          sendMessage,
+          forfeit,
+        } as GameData
+      }
     >
       {children}
     </GameContext.Provider>
